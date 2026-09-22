@@ -64,13 +64,14 @@ export function currentWeather() {
 // type/severity 供灌溉结算（降雨补水、干旱耗水）使用。
 // 幂等：同一事件同一天已写入 weather_log 则直接跳过，读档/重试不会重复扣损。
 export function settleWeather(absDay) {
-  const mods = { waterAdd: 0, fertAdd: 0, lightAdd: 0, setWater: null, pestAdd: 0, growthBlock: false, stageRegressChance: 0, animalHpAdd: 0, animalRecover: 0, lightRecover: 0 }
+  const mods = { waterAdd: 0, fertAdd: 0, lightAdd: 0, setWater: null, pestAdd: 0, growthBlock: false, stageRegressChance: 0, animalHpAdd: 0, animalRecover: 0, lightRecover: 0, plantDamage: 0, plantRecover: 0, weatherBad: false }
   const logs = []
   const ev = q1('SELECT * FROM weather_events WHERE done=0 ORDER BY abs_day LIMIT 1')
   if (!ev) {
     // 无事件：晴好恢复日
     mods.animalRecover = 8
     mods.lightRecover = 10
+    mods.plantRecover = 5
     return { mods, logs, type: 'sunny', severity: 0 }
   }
   if (q1('SELECT id FROM weather_log WHERE event_id=? AND abs_day=?', ev.id, absDay)) {
@@ -82,6 +83,7 @@ export function settleWeather(absDay) {
     if (ev.type === 'rain') { mods.setWater = 100; mods.lightAdd = -10 }
     mods.animalRecover = 8
     mods.lightRecover = 10
+    mods.plantRecover = 4
     finishDay(ev, absDay, logs, `${def.icon} ${def.name}：风调雨顺，作物与动物状态恢复`)
     return { mods, logs, type: ev.type, severity: ev.severity }
   }
@@ -104,6 +106,9 @@ export function settleWeather(absDay) {
   if (e.growthBlock && factor >= 0.5) mods.growthBlock = true
   mods.stageRegressChance = (e.regress || 0) * factor
   mods.animalHpAdd -= Math.round((e.animal || 0) * sev * factor)
+  // 育种试验健康伤害：与动物伤害同源（灾害越强伤害越高），受防护系数折减
+  mods.plantDamage = Math.round((e.animal || 0) * sev * factor)
+  mods.weatherBad = true
 
   const tierTxt = ['⚠️无防护', '🛡️半防护', '🛡️全防护'][tier]
   const parts = []

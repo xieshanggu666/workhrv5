@@ -131,6 +131,55 @@ CREATE TABLE IF NOT EXISTS production_jobs (
   cancel_abs INTEGER DEFAULT NULL,      -- 取消时的绝对天（NULL 未取消）
   status TEXT NOT NULL DEFAULT 'running' -- running/done/canceled/collected
 );
+
+-- ===== 杂交育种 =====
+-- 杂交新品种（遗传性状作物）：id 从 1000 起，与 crops 表基础作物共存；
+-- plots.crop_id 既可能指向基础作物（<1000）也可能指向品种（>=1000）。
+-- sig = 本源作物 + 排序后性状，保证同一品种重复育成时复用而非重复建行。
+CREATE TABLE IF NOT EXISTS crop_varieties (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  base_id INTEGER NOT NULL,             -- 本源基础作物 crops.id
+  name TEXT NOT NULL UNIQUE,
+  sprite TEXT NOT NULL,
+  season INTEGER NOT NULL,              -- 适宜季节（随本源）
+  days INTEGER NOT NULL,                -- 成熟期（性状已折算）
+  price INTEGER NOT NULL,               -- 售价（性状已折算）
+  seed_price INTEGER NOT NULL,
+  traits TEXT NOT NULL DEFAULT '[]',    -- 遗传性状 key 数组（JSON）
+  sig TEXT NOT NULL UNIQUE,
+  parent_a TEXT NOT NULL,               -- 父本引用：base:<id> / var:<id>
+  parent_b TEXT NOT NULL,               -- 母本引用
+  gen INTEGER NOT NULL DEFAULT 1,       -- 谱系代数（基础作物为 0）
+  created_abs INTEGER NOT NULL
+);
+
+-- 育种试验：投入两批作物，随游戏天推进，受养护与天气影响，成熟产出带遗传性状的种子
+CREATE TABLE IF NOT EXISTS breeding_trials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_a TEXT NOT NULL,
+  parent_b TEXT NOT NULL,
+  parent_a_name TEXT NOT NULL,
+  parent_a_icon TEXT NOT NULL,
+  parent_a_traits TEXT NOT NULL DEFAULT '[]',
+  parent_b_name TEXT NOT NULL,
+  parent_b_icon TEXT NOT NULL,
+  parent_b_traits TEXT NOT NULL DEFAULT '[]',
+  base_id INTEGER NOT NULL,             -- 子代本源作物（跨种杂交时随机取亲本之一）
+  traits_json TEXT NOT NULL DEFAULT '[]', -- 授粉时即确定的子代性状（影响试验与后续种植）
+  status TEXT NOT NULL DEFAULT 'running', -- running/done/failed/canceled
+  progress INTEGER NOT NULL DEFAULT 0,  -- 已发育天数（达标即成熟）
+  days_total INTEGER NOT NULL DEFAULT 4,
+  water INTEGER NOT NULL DEFAULT 75,    -- 试验田水分（浇水养护）
+  fert INTEGER NOT NULL DEFAULT 75,     -- 肥力（施肥养护）
+  health INTEGER NOT NULL DEFAULT 100,  -- 健康度（恶劣天气下降，照料恢复；归零试验失败）
+  care INTEGER NOT NULL DEFAULT 0,      -- 养护累计分 0~100（决定产出种子数）
+  care_count INTEGER NOT NULL DEFAULT 0,
+  blocked_days INTEGER NOT NULL DEFAULT 0, -- 受阻天数（条件不良/灾害停长）
+  result_variety_id INTEGER,
+  result_seeds INTEGER NOT NULL DEFAULT 0,
+  start_abs INTEGER NOT NULL,
+  finish_abs INTEGER
+);
 `)
 
 // 兼容旧存档：player 增加绝对天数（天气结算对齐用）
@@ -138,6 +187,10 @@ const playerCols = db.prepare('PRAGMA table_info(player)').all().map((c) => c.na
 if (!playerCols.includes('abs_day')) {
   db.exec('ALTER TABLE player ADD COLUMN abs_day INTEGER NOT NULL DEFAULT 1')
 }
+
+// 杂交品种 id 从 1000 起，避免与基础作物 crops.id（1..n）冲突；
+// sqlite_sequence 已存在更高值时该设置不会回退
+db.exec("INSERT OR IGNORE INTO sqlite_sequence(name,seq) VALUES('crop_varieties',999)")
 
 // 兼容旧存档：plots 增加灌溉优先级（0低 1中 2高，水量不足时高优先级先供水）
 const plotCols = db.prepare('PRAGMA table_info(plots)').all().map((c) => c.name)

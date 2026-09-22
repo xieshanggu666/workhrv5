@@ -14,6 +14,7 @@ export const useGameStore = defineStore('game', {
     loaded: false,
     player: null,
     crops: [],
+    varieties: [],
     inventory: [],
     buildings: [],
     animals: [],
@@ -24,6 +25,7 @@ export const useGameStore = defineStore('game', {
     productionJobs: [],
     queueCapacity: 0,
     queuedBatches: 0,
+    breeding: null,
     irrigation: [],
     irrigationCosts: { reservoir: 60, canal: 8 },
     irrBuildMode: null,      // 'reservoir' | 'canal' | null：地图放置模式
@@ -38,13 +40,23 @@ export const useGameStore = defineStore('game', {
       const map = ['🌸 春', '☀️ 夏', '🍂 秋', '❄️ 冬']
       return s.player ? map[s.player.season % 4] : '🌸 春'
     },
-    currentSeason: (s) => s.player?.season ?? 0
+    currentSeason: (s) => s.player?.season ?? 0,
+    // 统一作物表：基础作物 + 杂交品种（id 均唯一）
+    allCrops: (s) => {
+      const vars = (s.varieties || []).map((v) => ({
+        id: v.id, name: v.name, days: v.days, season: v.season,
+        price: v.price, seedPrice: v.seed_price, sprite: v.sprite,
+        traits: v.traits || [], gen: v.gen, base_id: v.base_id, isVariety: true
+      }))
+      return [...s.crops.map((c) => ({ ...c, traits: [], gen: 0, base_id: c.id, isVariety: false })), ...vars]
+    }
   },
   actions: {
     async load() {
       const d = await api('/state')
       this.player = d.player
       this.crops = d.crops
+      this.varieties = d.varieties || []
       this.inventory = d.inventory
       this.buildings = d.buildings
       this.animals = d.animals
@@ -55,6 +67,7 @@ export const useGameStore = defineStore('game', {
       this.productionJobs = d.productionJobs || []
       this.queueCapacity = d.queueCapacity || 0
       this.queuedBatches = d.queuedBatches || 0
+      this.breeding = d.breeding || null
       this.irrigation = d.irrigation || []
       this.irrigationCosts = d.irrigationCosts || this.irrigationCosts
       this.loaded = true
@@ -96,7 +109,7 @@ export const useGameStore = defineStore('game', {
     async harvest() {
       if (!this.selectedPlot) return
       const r = await api('/harvest', 'POST', { plotId: this.selectedPlot.id })
-      if (r.ok) this.showToast(`收获 ${r.yield} +${r.gold}金`, 'success')
+      if (r.ok) this.showToast(`收获 ${r.yield} ×${r.qty || 1} +${r.gold}金${r.variety ? '🧬' : ''}`, 'success')
       else this.showToast('作物还未成熟', 'warn')
       await this.load()
     },
@@ -104,9 +117,9 @@ export const useGameStore = defineStore('game', {
       const r = await api('/skip', 'POST', { n })
       await this.load()
       const logs = r.logs || []
-      // 天气结算记录只进时间线，不弹 toast；加工完工取第一条弹提示
-      logs.forEach((m) => { if (!m.startsWith('✅')) this.pushLog(m, 'warn') })
-      const done = logs.filter((m) => m.startsWith('✅'))
+      // 天气/系统结算记录只进时间线，不弹 toast；加工完工与育种成功取第一条弹提示
+      logs.forEach((m) => { if (!m.startsWith('✅') && !m.startsWith('🧬')) this.pushLog(m, 'warn') })
+      const done = logs.filter((m) => m.startsWith('✅') || m.startsWith('🧬'))
       if (done.length) this.showToast(done[0], 'success')
       else this.showToast(`时间 +${n} 天`, 'info')
     },
@@ -222,6 +235,28 @@ export const useGameStore = defineStore('game', {
       try {
         await api('/irrigation/priority', 'POST', { plotId, priority })
         await this.load()
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+
+    // ===== 杂交育种 =====
+    async startBreeding(parentA, parentB) {
+      try {
+        await api('/breeding/start', 'POST', { parentA, parentB })
+        await this.load()
+        this.showToast('🧬 杂交试验已开始，随游戏天推进，注意浇水施肥与防灾', 'success')
+      } catch (e) { this.showToast(e.message, 'warn'); throw e }
+    },
+    async careBreeding(id, action) {
+      try {
+        await api('/breeding/care', 'POST', { id, action })
+        await this.load()
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+    async cancelBreeding(id) {
+      try {
+        await api('/breeding/cancel', 'POST', { id })
+        await this.load()
+        this.showToast('试验已取消（亲本已消耗不退）', 'info')
       } catch (e) { this.showToast(e.message, 'warn') }
     },
 

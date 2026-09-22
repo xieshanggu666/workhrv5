@@ -2,16 +2,19 @@ import { db } from './db.js'
 
 // ===== 配方表（以服务端为准，前端仅做展示）=====
 // days：每批耗时（游戏天）；needLv：加工坊等级要求
+// baseCrop：本源基础作物 id；设置后该配方可消耗任意同本源的杂交品种作物（贯通新品种加工）
 export const RECIPES = [
   {
     id: 'flour', name: '面粉', icon: '🍞',
     from: 'crop-5', fromName: '小麦', fromIcon: '🌾', fromCat: 'crop',
+    baseCrop: 5,
     consume: 2, result: 'flour', resultName: '面粉', resultCat: 'material',
     gain: 1, days: 1, needLv: 1
   },
   {
     id: 'juice', name: '番茄汁', icon: '🧃',
     from: 'crop-2', fromName: '番茄', fromIcon: '🍅', fromCat: 'crop',
+    baseCrop: 2,
     consume: 2, result: 'juice', resultName: '番茄汁', resultCat: 'product',
     gain: 1, days: 1, needLv: 1
   },
@@ -36,12 +39,14 @@ export const RECIPES = [
   {
     id: 'popcorn', name: '烤玉米', icon: '🍿',
     from: 'crop-3', fromName: '玉米', fromIcon: '🌽', fromCat: 'crop',
+    baseCrop: 3,
     consume: 2, result: 'popcorn', resultName: '烤玉米', resultCat: 'product',
     gain: 1, days: 1, needLv: 4
   },
   {
     id: 'pickle', name: '泡菜', icon: '🥬',
     from: 'crop-6', fromName: '白菜', fromIcon: '🥬', fromCat: 'crop',
+    baseCrop: 6,
     consume: 3, result: 'pickle', resultName: '泡菜', resultCat: 'product',
     gain: 2, days: 2, needLv: 5
   }
@@ -62,6 +67,38 @@ const run = (sql, ...p) => db.prepare(sql).run(...p)
 
 function stockOf(itemId) {
   return q1('SELECT qty FROM inventory WHERE item_id=?', itemId)?.qty || 0
+}
+// 配方原料可用量：设置了 baseCrop 的配方，本源基础作物与同本源杂交品种作物合并计算
+function recipeStock(r) {
+  if (!r.baseCrop) return stockOf(r.from)
+  let total = stockOf('crop-' + r.baseCrop)
+  for (const v of q('SELECT id FROM crop_varieties WHERE base_id=?', r.baseCrop)) {
+    total += stockOf('crop-v' + v.id)
+  }
+  return total
+}
+// 按本源扣减原料：先消耗基础作物，再按品种代数从低到高（优先普通品种）
+function consumeCropByBase(baseId, need) {
+  let remain = need
+  const base = q1('SELECT qty FROM inventory WHERE item_id=?', 'crop-' + baseId)
+  if (base) {
+    const take = Math.min(remain, base.qty)
+    run('UPDATE inventory SET qty=qty-? WHERE item_id=?', take, 'crop-' + baseId)
+    remain -= take
+  }
+  if (remain > 0) {
+    const vars = q(`SELECT i.id, i.qty FROM inventory i
+                    JOIN crop_varieties v ON i.item_id = 'crop-v' || v.id
+                    WHERE v.base_id=? AND i.qty>0 ORDER BY v.gen ASC, v.id ASC`, baseId)
+    for (const s of vars) {
+      if (remain <= 0) break
+      const take = Math.min(remain, s.qty)
+      run('UPDATE inventory SET qty=qty-? WHERE id=?', take, s.id)
+      remain -= take
+    }
+  }
+  cleanEmpty()
+  return need - remain
 }
 function addInv(itemId, name, cat, n) {
   const row = q1('SELECT qty FROM inventory WHERE item_id=?', itemId)
@@ -184,11 +221,14 @@ export function enqueueJob({ recipeId, qty, millLevel, currentAbs }) {
     throw Object.assign(new Error(`队列已满（${used}/${capacity(millLevel)} 批），等工单完工或取消一些再排产`), { status: 400 })
   }
   const need = r.consume * n
-  if (stockOf(r.from) < need) throw Object.assign(new Error(`原料不足：需要 ${r.fromName} ×${need}`), { status: 400 })
+  if (recipeStock(r) < need) throw Object.assign(new Error(`原料不足：需要 ${r.fromName} ×${need}`), { status: 400 })
   db.exec('BEGIN IMMEDIATE')
   try {
-    run('UPDATE inventory SET qty=qty-? WHERE item_id=?', need, r.from)
-    cleanEmpty()
+    if (r.baseCrop) consumeCropByBase(r.baseCrop, need)
+    else {
+      run('UPDATE inventory SET qty=qty-? WHERE item_id=?', need, r.from)
+      cleanEmpty()
+    }
     const res = run(
       `INSERT INTO production_jobs
        (recipe_id,recipe_name,result_id,result_name,result_cat,from_id,from_name,from_cat,

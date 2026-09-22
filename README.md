@@ -37,10 +37,20 @@ npm run dev
    为相邻耕地供水，优先级 高→低（同级水分低者优先），水量有限耗尽即止；
    降雨/暴雨为蓄水池补水，干旱/酷暑加速蒸发；设施可停用（断流）/启用（恢复）/拆除（返还半价），
    地块可设灌溉优先级，干涸断流会在事件记录中预警
+9. **杂交育种**：在「🧬 育种」页投入两批作物（同类或跨类，各 2 个 + 金币）开始试验，
+   试验随游戏天推进（约 4 天），每日需浇水/施肥/照料；暴雨霜冻等恶劣天气会损耗试验健康，
+   抗旱/抗寒性状与天气防护可减免，健康归零试验失败。成熟后产出带**遗传性状**的新品种种子：
+   高产/抗旱/抗寒/抗虫/速生/巨型（另有脆弱/低产等负面突变），性状按概率继承、低概率突变。
+   新品种贯通**播种 → 生长（性状影响耗水/虫害/抗灾/成熟速度）→ 收获（产量/售价修正）→
+   加工（同本源品种作物可作为配方原料）→ 交易**；图鉴中可查看每代**谱系**，
+   同性状组合复育会稳定得到同一品种；升级育种棚可并行更多组试验
 
 ## 数据库表
 
-`player` `plots` `crops` `inventory` `buildings` `animals` `weather_events` `weather_log` `production_jobs` `irrigation`
+`player` `plots` `crops` `crop_varieties` `inventory` `buildings` `animals` `weather_events` `weather_log` `production_jobs` `irrigation` `breeding_trials`
+
+> 新品种（`crop_varieties`，id 从 1000 起）与基础作物（`crops`）共用 `plots.crop_id`；
+> 旧存档启动时自动建表、补列并补插「育种棚」建筑，无需手动迁移。
 
 ## 后续可扩展
 

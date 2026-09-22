@@ -3,8 +3,12 @@
     <button v-for="t in tabs" :key="t.key" :class="{active:tab===t.key}" @click="tab=t.key">
       {{ t.label }}
       <span v-if="t.key==='process' && collectableJobs.length" class="badge">{{ collectableJobs.length }}</span>
+      <span v-if="t.key==='breed' && runningTrials" class="badge breed-badge">{{ runningTrials }}</span>
     </button>
   </div>
+
+  <!-- 育种棚 -->
+  <BreedingPanel v-if="tab==='breed'" />
 
   <!-- 市场 -->
   <div v-if="tab==='market'" class="page">
@@ -27,7 +31,7 @@
       <div v-if="!sellable.length" class="none">暂无库存，请先收获作物</div>
       <div class="row" v-for="s in sellable" :key="s.item_id">
         <span class="i">{{ s.icon }}</span>
-        <div class="m-info"><b>{{ s.name }}</b><span class="tag">×{{ s.qty }}</span></div>
+        <div class="m-info"><b>{{ s.name }}<span v-if="s.isVariety" class="tag gen">🧬 品种</span></b><span class="tag">×{{ s.qty }}</span></div>
         <span class="price">🪙{{ s.unit }} /个</span>
         <button class="mini green" @click="store.sellCrop(s.cropId,1)">卖1</button>
         <button class="mini green" @click="store.sellCrop(s.cropId,5)">卖5</button>
@@ -67,7 +71,7 @@
           <span class="tag">{{ r.fromIcon }} {{ r.fromName }} ×{{ r.consume }}/批</span>
           <span class="tag">→ {{ r.name }} ×{{ r.gain }}</span>
           <span class="tag">⏱ {{ r.days }} 天/批</span>
-          <span class="tag">库存 ×{{ stockOf(r.from) }}</span>
+          <span class="tag" :class="{mixed:r.baseCrop}">库存 ×{{ recipeStock(r) }}{{ r.baseCrop ? '（含🧬品种）' : '' }}</span>
         </div>
         <div class="proc-ctl">
           <button class="mini" :disabled="!canMake(r,1)" @click="doEnqueue(r,1)">排产×1</button>
@@ -168,6 +172,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useGameStore } from '@/store/game'
+import BreedingPanel from '@/components/BreedingPanel.vue'
 const store = useGameStore()
 const tab = ref('market')
 const healthColor = '#4caf50'
@@ -175,29 +180,38 @@ const healthColor = '#4caf50'
 const tabs = [
   { key: 'market', label: '🏪 市场' },
   { key: 'process', label: '⚙️ 加工坊' },
+  { key: 'breed', label: '🧬 育种' },
   { key: 'barn', label: '🐖 畜棚' },
   { key: 'bag', label: '🎒 背包' },
   { key: 'build', label: '🏠 建筑' }
 ]
 
-const cropIcon = computed(() => {
-  const m = {}
-  store.crops.forEach((c) => { m[c.id] = c.sprite })
-  return m
-})
+// 库存作物 → 展示信息（兼容杂交品种 crop-v<id>）
+function cropOfItem(itemId) {
+  if (itemId.startsWith('crop-v')) {
+    const v = store.varieties.find((x) => x.id === Number(itemId.slice(6)))
+    return v ? {
+      id: v.id, name: v.name, price: v.price, sprite: v.sprite, isVariety: true
+    } : null
+  }
+  const c = store.crops.find((x) => x.id === Number(itemId.split('-')[1]))
+  return c ? { id: c.id, name: c.name, price: c.price, sprite: c.sprite, isVariety: false } : null
+}
 const sellable = computed(() =>
   store.inventory
     .filter((it) => it.cat === 'crop')
     .map((it) => {
-      const id = it.item_id.split('-')[1]
-      const crop = store.crops.find((c) => c.id === Number(id)) || { id: 0, price: 1 }
-      return { ...it, icon: cropIcon.value[id] || '🧺', unit: crop.price, cropId: crop.id }
+      const c = cropOfItem(it.item_id) || { id: 0, price: 1, sprite: '🧺', name: it.name }
+      return { ...it, icon: c.sprite, unit: c.price, cropId: c.id, isVariety: c.isVariety }
     })
 )
 function catName(c) { return { seed: '种子', crop: '作物', product: '制品', material: '材料' }[c] || c }
 function iconOf(it) {
-  if (it.cat === 'crop') return cropIcon.value[it.item_id.split('-')[1]] || '🧺'
-  if (it.cat === 'seed') return '🌱'
+  if (it.cat === 'crop') return cropOfItem(it.item_id)?.sprite || '🧺'
+  if (it.cat === 'seed') {
+    if (it.item_id.startsWith('seed-v')) return cropOfItem('crop-' + it.item_id.slice(5))?.sprite || '🧬'
+    return '🌱'
+  }
   if (it.cat === 'product') { return { 'p-chicken': '🥚', 'p-cow': '🥛', 'p-sheep': '🧶' }[it.item_id] || '📦' }
   if (it.item_id === 'disaster-kit') return '🧱'
   return { flour: '🍞', juice: '🧃', cheese: '🧀', bread: '🥖', wool: '🧵', popcorn: '🍿', pickle: '🥬' }[it.item_id] || '📦'
@@ -209,9 +223,19 @@ const mill = computed(() => store.buildings.find((b) => b.name === '加工坊'))
 const barn = computed(() => store.buildings.find((b) => b.name === '畜棚'))
 
 // ===== 生产队列 =====
+// 配方原料库存：有 baseCrop 时合并本源基础作物与同本源杂交品种（新品种贯通加工）
 function stockOf(itemId) {
   return store.inventory.find((it) => it.item_id === itemId)?.qty || 0
 }
+function recipeStock(r) {
+  if (!r.baseCrop) return stockOf(r.from)
+  let total = stockOf('crop-' + r.baseCrop)
+  for (const v of store.varieties.filter((x) => x.base_id === r.baseCrop)) {
+    total += stockOf('crop-v' + v.id)
+  }
+  return total
+}
+const runningTrials = computed(() => store.breeding?.running || 0)
 function recipeIcon(id) {
   return store.recipes.find((r) => r.id === id)?.icon || '🛠️'
 }
@@ -220,11 +244,11 @@ const freeSlots = computed(() => Math.max(0, store.queueCapacity - store.queuedB
 function canMake(r, n) {
   if (mill.value.level < r.needLv) return false
   if (n > freeSlots.value) return false
-  return stockOf(r.from) >= r.consume * n
+  return recipeStock(r) >= r.consume * n
 }
 async function doEnqueue(r, n) {
   // 原料/空位只够一部分时，自动收缩为可做批次数
-  const real = Math.min(n, Math.floor(stockOf(r.from) / r.consume), freeSlots.value)
+  const real = Math.min(n, Math.floor(recipeStock(r) / r.consume), freeSlots.value)
   if (real <= 0) return
   try { await store.enqueueProduction(r.id, real) } catch { /* toast 已提示 */ }
 }
@@ -249,6 +273,9 @@ function stateLabel(j) {
 .tabs button { background:#13233f;border:1px solid rgba(120,160,220,0.2);color:#aebadd;padding:8px 14px;border-radius:8px;cursor:pointer;font-size:13px;position:relative; }
 .tabs button.active { background:linear-gradient(135deg,#1d3f8f,#2962ff);color:#fff;border-color:transparent; }
 .badge{position:absolute;top:-6px;right:-6px;background:#e53935;color:#fff;font-size:10px;min-width:16px;height:16px;line-height:16px;border-radius:8px;padding:0 4px;font-weight:700;}
+.badge.breed-badge{background:#8e24aa;}
+.tag.gen{color:#ce93d8;background:#2a1b3d;}
+.tag.mixed{color:#ce93d8;}
 .page { display:grid;grid-template-columns:1fr 1fr;gap:16px; }
 @media(max-width:760px){ .page{grid-template-columns:1fr;} }
 .pcol { display:flex;flex-direction:column;gap:2px; }

@@ -9,6 +9,10 @@ import {
   COSTS as IRR_COSTS, RESERVOIR_CAP, networkInfo,
   settleIrrigation, buildFacility, toggleFacility, demolishFacility
 } from './irrigation.js'
+import {
+  TRAITS, BREED_GOLD, breedCapacity,
+  cropLike, listTrials, startTrial, careTrial, cancelTrial, settleBreeding
+} from './breeding.js'
 
 const app = express()
 app.use(express.json())
@@ -46,7 +50,8 @@ function seed() {
     ['农舍', 1, 0, 7, '你的家，升级可解锁新功能'],
     ['加工坊', 1, 7, 0, '将作物加工为制品出售'],
     ['畜棚', 1, 8, 7, '养殖动物，产出蛋奶毛'],
-    ['市场', 1, 7, 6, '出售作物与制品']
+    ['市场', 1, 7, 6, '出售作物与制品'],
+    ['育种棚', 1, 10, 7, '杂交育种：投入两批作物培育带遗传性状的新品种']
   ]
   const bIns = db.prepare('INSERT INTO buildings VALUES (?,?,?,?,?,?)')
   buildings.forEach((b, i) => bIns.run(i + 1, ...b))
@@ -58,6 +63,12 @@ const q = (sql, ...p) => db.prepare(sql).all(...p)
 const q1 = (sql, ...p) => db.prepare(sql).get(...p)
 const run = (sql, ...p) => db.prepare(sql).run(...p)
 
+// 兼容旧存档：补插育种棚（新存档已在 seed() 中创建）
+if (!q1('SELECT id FROM buildings WHERE name=?', '育种棚')) {
+  run('INSERT INTO buildings (name,level,x,y,desc) VALUES (?,?,?,?,?)',
+    '育种棚', 1, 10, 7, '杂交育种：投入两批作物培育带遗传性状的新品种')
+}
+
 // 启动时确保当天天气已生成（兼容旧存档）
 const p0 = q1('SELECT * FROM player WHERE id=1')
 ensureWeather(p0.season, p0.day, p0.abs_day)
@@ -66,11 +77,14 @@ ensureWeather(p0.season, p0.day, p0.abs_day)
 app.get('/api/state', (req, res) => {
   const p = q1('SELECT * FROM player WHERE id=1')
   const mill = q1('SELECT * FROM buildings WHERE id=2')
+  const lab = q1("SELECT * FROM buildings WHERE name='育种棚'")
   // 供水网络：连通且启用中的地块/水渠（前端绘制供水状态用）
   const net = networkInfo()
   res.json({
     player: p,
     crops: q('SELECT * FROM crops'),
+    varieties: q('SELECT * FROM crop_varieties ORDER BY id')
+      .map((v) => ({ ...v, traits: JSON.parse(v.traits || '[]') })),
     inventory: q('SELECT * FROM inventory'),
     buildings: q('SELECT * FROM buildings'),
     animals: q('SELECT * FROM animals'),
@@ -81,6 +95,15 @@ app.get('/api/state', (req, res) => {
     queueCapacity: capacity(mill?.level || 1),
     queuedBatches: queuedBatches(p.abs_day),
     productionJobs: listJobs(p.abs_day),
+    breeding: {
+      trials: listTrials(),
+      traits: TRAITS,
+      capacity: breedCapacity(lab?.level || 1),
+      running: q1("SELECT COUNT(*) c FROM breeding_trials WHERE status='running'").c,
+      goldCost: BREED_GOLD,
+      labId: lab?.id || null,
+      labLevel: lab?.level || 1
+    },
     irrigation: q('SELECT * FROM irrigation').map((f) => ({
       ...f,
       cap: f.kind === 'reservoir' ? RESERVOIR_CAP : null,
@@ -90,21 +113,22 @@ app.get('/api/state', (req, res) => {
   })
 })
 
-// 播种：plotId + cropId
+// 播种：plotId + cropId（<1000 基础作物，>=1000 杂交品种）
 app.post('/api/plant', (req, res) => {
   const { plotId, cropId } = req.body
   const plot = q1('SELECT * FROM plots WHERE id=?', plotId)
-  const crop = q1('SELECT * FROM crops WHERE id=?', cropId)
+  const crop = cropLike(cropId)
   if (!plot || !crop) return res.status(404).json({ error: 'not found' })
   if (plot.crop_id) return res.status(400).json({ error: 'already planted' })
-  const inv = q1("SELECT * FROM inventory WHERE item_id=? AND cat='seed'", 'seed-' + crop.id)
-  const invById = q1("SELECT qty FROM inventory WHERE item_id=?", 'seed-' + crop.id)
+  const seedId = crop.isVariety ? 'seed-v' + crop.id : 'seed-' + crop.id
+  const invById = q1("SELECT qty FROM inventory WHERE item_id=?", seedId)
   const stock = invById?.qty || 0
   if (stock <= 0) return res.status(400).json({ error: 'no seed' })
   run(`UPDATE plots SET crop_id=?, stage=0, water=100, fert=100, light=100, pest=0,
        planted_day=(SELECT day FROM player WHERE id=1), planted_season=(SELECT season FROM player WHERE id=1)
-       WHERE id=?`, cropId, plotId)
-  run(`UPDATE inventory SET qty=qty-1 WHERE item_id=?`, 'seed-' + crop.id)
+       WHERE id=?`, crop.id, plotId)
+  run(`UPDATE inventory SET qty=qty-1 WHERE item_id=?`, seedId)
+  cleanEmpty()
   res.json({ ok: true })
 })
 
@@ -129,20 +153,33 @@ app.post('/api/clean', (req, res) => {
   res.json({ ok: true })
 })
 
-// 收获：返回作物，给钱（若成熟）
+// 收获：返回作物，给钱（若成熟）；品种按遗传性状结算产量与售价
 app.post('/api/harvest', (req, res) => {
   const { plotId } = req.body
   const plot = q1('SELECT * FROM plots WHERE id=?', plotId)
   if (!plot || !plot.crop_id) return res.status(404).json({ error: 'empty' })
-  const crop = q1('SELECT * FROM crops WHERE id=?', plot.crop_id)
+  const crop = cropLike(plot.crop_id)
+  if (!crop) return res.status(404).json({ error: 'crop missing' })
   const isFullGrown = isCropGrown(plot, crop)
   if (isFullGrown) {
-    run('UPDATE player SET gold=gold+?, exp=exp+? WHERE id=1', crop.price, 3)
-    // 得到作物 + 概率得种子
-    addInv('crop-' + crop.id, crop.name, 'crop', 1)
-    if (Math.random() < 0.25) addInv('seed-' + crop.id, crop.name + '种子', 'seed', 1)
+    // 产量：基础 1；高产 +1、低产 -1（保底 1）
+    let yieldN = 1
+    if (crop.isVariety) {
+      for (const k of crop.traits) {
+        const m = TRAITS[k]?.mods || {}
+        if (m.harvestYield) yieldN += m.harvestYield
+      }
+    }
+    yieldN = Math.max(1, yieldN)
+    const gain = crop.price * yieldN
+    run('UPDATE player SET gold=gold+?, exp=exp+? WHERE id=1', gain, 3)
+    // 得到作物 + 概率得同种种子
+    const cropItemId = crop.isVariety ? 'crop-v' + crop.id : 'crop-' + crop.id
+    const seedItemId = crop.isVariety ? 'seed-v' + crop.id : 'seed-' + crop.id
+    addInv(cropItemId, crop.name, 'crop', yieldN)
+    if (Math.random() < 0.25) addInv(seedItemId, crop.name + '种子', 'seed', 1)
     run('UPDATE plots SET crop_id=NULL, stage=-1, water=100, fert=100, light=100, pest=0, planted_day=NULL, planted_season=NULL WHERE id=?', plotId)
-    return res.json({ ok: true, yield: crop.name, gold: crop.price })
+    return res.json({ ok: true, yield: crop.name, qty: yieldN, gold: gain, variety: crop.isVariety })
   }
   return res.json({ ok: false, reason: 'not grown' })
 })
@@ -220,17 +257,19 @@ app.post('/api/buyseed', (req, res) => {
   res.json({ ok: true })
 })
 
-// 卖作物
+// 卖作物（兼容杂交品种：cropId>=1000 走品种库存与价格）
 app.post('/api/sellcrop', (req, res) => {
   const { cropId, qty } = req.body
   const n = Math.max(1, Math.min(Number(qty) || 1, 999))
-  const crop = q1('SELECT * FROM crops WHERE id=?', cropId)
-  const hold = q1("SELECT qty FROM inventory WHERE item_id=?", 'crop-' + crop.id)
+  const crop = cropLike(cropId)
+  if (!crop) return res.status(404).json({ error: 'crop' })
+  const itemId = crop.isVariety ? 'crop-v' + crop.id : 'crop-' + crop.id
+  const hold = q1("SELECT qty FROM inventory WHERE item_id=?", itemId)
   const stock = hold?.qty || 0
   const s = Math.min(n, stock)
   if (s <= 0) return res.status(400).json({ error: 'none' })
   const gain = crop.price * s
-  run(`UPDATE inventory SET qty=qty-? WHERE item_id=?`, s, 'crop-' + crop.id)
+  run(`UPDATE inventory SET qty=qty-? WHERE item_id=?`, s, itemId)
   run('UPDATE player SET gold=gold+? WHERE id=1', gain)
   cleanEmpty()
   res.json({ ok: true, gain, sold: s })
@@ -349,6 +388,42 @@ app.post('/api/irrigation/priority', (req, res) => {
   res.json({ ok: true, priority })
 })
 
+// ===== 杂交育种 =====
+// 开始试验：两批作物 parentA/parentB，格式 base:<id> 或 var:<id>
+app.post('/api/breeding/start', (req, res) => {
+  try {
+    const lab = q1("SELECT level FROM buildings WHERE name='育种棚'")
+    const p = q1('SELECT abs_day FROM player WHERE id=1')
+    const r = startTrial({
+      parentA: String(req.body?.parentA || ''),
+      parentB: String(req.body?.parentB || ''),
+      labLevel: lab?.level || 1,
+      currentAbs: p.abs_day
+    })
+    res.json(r)
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 养护试验：water 浇水 / fert 施肥 / tend 照料
+app.post('/api/breeding/care', (req, res) => {
+  try {
+    res.json(careTrial(Number(req.body?.id), String(req.body?.action || '')))
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
+// 取消试验（亲本不退）
+app.post('/api/breeding/cancel', (req, res) => {
+  try {
+    res.json(cancelTrial(Number(req.body?.id)))
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message })
+  }
+})
+
 // 升级建筑
 app.post('/api/upgrade', (req, res) => {
   const { id } = req.body
@@ -386,28 +461,44 @@ function advanceDay() {
     const { mods, logs: wlogs, type: wType, severity: wSev } = settleWeather(p.abs_day)
     logs.push(...wlogs)
     day += 1
-    // 更新所有地块：生长 + 四维变化 + 虫害 + 天气修正
+    // 更新所有地块：生长 + 四维变化 + 虫害 + 天气修正（杂交品种性状参与结算）
     const plots = q('SELECT * FROM plots')
     for (const pl of plots) {
       if (!pl.crop_id) continue
-      // 四维消耗 + 天气修正
-      let water = pl.water - (12 + Math.round(Math.random() * 12)) + mods.waterAdd
-      let fert = pl.fert - (8 + Math.round(Math.random() * 8)) + mods.fertAdd
-      let light = pl.light - (6 + Math.round(Math.random() * 8)) + mods.lightAdd + mods.lightRecover
+      const crop = cropLike(pl.crop_id)
+      if (!crop) continue
+      const tset = new Set(crop.isVariety ? crop.traits : [])
+      const traitMul = (k, f) => (tset.has(k) ? f : 1)
+      // 四维消耗 + 天气修正（性状：抗旱减半耗水、脆弱放大天气损耗）
+      const waterDecayMul = (tset.has('droughthardy') ? 0.5 : 1) * traitMul('weak', (TRAITS.weak.mods.weatherMul))
+      const weatherMul = traitMul('weak', TRAITS.weak.mods.weatherMul)
+      let water = pl.water - (12 + Math.round(Math.random() * 12)) * waterDecayMul
+        + (mods.waterAdd || 0) * weatherMul
+      let fert = pl.fert - (8 + Math.round(Math.random() * 8)) + (mods.fertAdd || 0) * weatherMul
+      let light = pl.light - (6 + Math.round(Math.random() * 8)) + (mods.lightAdd || 0) * weatherMul + mods.lightRecover
       // 季节光照影响
       if (season === 3) light -= 10
       // 降雨/暴雨直接灌满
       if (mods.setWater != null) water = mods.setWater
       water = clamp100(water); fert = clamp100(fert); light = clamp100(light)
-      let pest = Math.max(0, pl.pest + (Math.random() < 0.25 ? 1 : 0) + mods.pestAdd)
-      // 虫害过高会降低属性；恶劣天气可能阻止生长
-      const flux = water >= 30 && fert >= 30 && light >= 30 && pest <= 0.6 && !mods.growthBlock
-      const crop = q1('SELECT days FROM crops WHERE id=?', pl.crop_id)
+      // 虫害：抗虫品种自然生虫率大减
+      const pestChance = 0.25 * (tset.has('pestresist') ? (TRAITS.pestresist.mods.pestChanceMul) : 1)
+      let pest = Math.max(0, pl.pest + (Math.random() < pestChance ? 1 : 0) + (mods.pestAdd || 0) * weatherMul)
+      // 虫害过高会降低属性；恶劣天气可能阻止生长（抗寒/抗旱品种可抵抗对应停长）
+      let blocked = !!mods.growthBlock
+      if (blocked) {
+        if (tset.has('frosthardy') && ['frost', 'freeze', 'blizzard'].includes(wType)) blocked = false
+        if (tset.has('droughthardy') && wType === 'drought') blocked = false
+      }
+      const flux = water >= 30 && fert >= 30 && light >= 30 && pest <= 0.6 && !blocked
       const full = pl.stage >= (crop.days - 1)
       let stage = pl.stage
-      if (!full && flux) stage += 1
-      else if (!full && !flux && pl.stage === 0) {
-        // 条件不良不生长（重长）
+      if (!full && flux) {
+        stage += 1
+        // 速生：条件良好时一天长两阶
+        if (tset.has('fastgrow') && Math.random() < TRAITS.fastgrow.mods.bonusGrowChance) {
+          stage = Math.min(crop.days - 1, stage + 1)
+        }
       }
       // 恶劣天气可能打坏作物（倒退一阶段）
       if (stage > 0 && mods.stageRegressChance > 0 && Math.random() < mods.stageRegressChance) stage -= 1
@@ -424,6 +515,8 @@ function advanceDay() {
     }
     // —— 灌溉：降雨补水/干旱耗水，蓄水池按连通关系与优先级分配有限水量 ——
     logs.push(...settleIrrigation(wType, wSev))
+    // —— 育种：试验随天推进，受养护（水分/肥力/照料）与天气影响，成熟产出新品种种子 ——
+    logs.push(...settleBreeding({ type: wType, severity: wSev, mods }, p.abs_day + 1))
     // 天数推进与季节轮转
     if (day > 28) {
       day = 1

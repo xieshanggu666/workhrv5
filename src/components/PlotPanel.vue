@@ -32,17 +32,21 @@
 
       <div class="divider"></div>
 
-      <!-- 空地：播种 -->
+      <!-- 空地：播种（仅显示背包中持有的种子，含杂交品种） -->
       <template v-if="!p.crop_id">
-        <div class="seed-crops">
-          <button v-for="c in store.crops" :key="c.id"
+        <div v-if="!seedChoices.length" class="empty">背包里没有种子，去市场购买或育种棚培育吧</div>
+        <div v-else class="seed-crops">
+          <button v-for="c in seedChoices" :key="c.id"
                   class="seed-opt"
                   :class="{sel: store.selectedCropId===c.id}"
                   @click="store.selectedCropId = c.id">
             <span class="sc-icon">{{ c.sprite }}</span>
-            <span class="sc-name">{{ c.name }}</span>
+            <span class="sc-name">{{ c.name }}<em v-if="c.isVariety">🧬</em></span>
+            <span class="sc-traits">
+              <i v-for="t in c.traitIcons" :key="t.k" :class="{bad:!t.good}" :title="t.name+'：'+t.desc">{{ t.icon }}</i>
+            </span>
             <span class="sc-days">{{ c.days }}天</span>
-            <span class="sc-seed">种{{ c.seedPrice }}</span>
+            <span class="sc-seed">×{{ c.qty }}</span>
           </button>
         </div>
         <button class="action primary" @click="store.plant()" :disabled="!store.selectedCropId">🌱 播种</button>
@@ -52,8 +56,13 @@
       <template v-else>
         <div class="crop-line">
           <span class="crop-sprite">{{ crop?.sprite }}</span>
-          <span>{{ crop?.name }}</span>
+          <span>{{ crop?.name }}<em v-if="crop?.isVariety" class="hybrid">🧬</em></span>
           <span class="stage" :class="{full:isGrown}">{{ isGrown ? '已成熟' : '生长 ' + p.stage + '/' + (crop?.days-1 || 0) }}</span>
+        </div>
+        <div class="plot-traits" v-if="crop?.isVariety && crop.traits.length">
+          <i v-for="k in crop.traits" :key="k" :class="{bad:!traitDef(k).good}" :title="traitDef(k).name+'：'+traitDef(k).desc">
+            {{ traitDef(k).icon }} {{ traitDef(k).name }}
+          </i>
         </div>
         <div class="actions-grid">
           <button class="action" @click="store.water()">💧 浇水</button>
@@ -71,9 +80,25 @@ import { computed } from 'vue'
 import { useGameStore } from '@/store/game'
 const store = useGameStore()
 const p = computed(() => store.selectedPlot || {})
-const crop = computed(() => store.crops.find((c) => c.id === p.value.crop_id))
+const crop = computed(() => store.allCrops.find((c) => c.id === p.value.crop_id))
 const isGrown = computed(() => crop.value && p.value.stage >= (crop.value.days - 1))
 function barColor(v) { return v < 30 ? '#ef5350' : v < 60 ? '#ffb300' : '#4caf50' }
+function traitDef(k) { return store.breeding?.traits?.[k] || { name: k, icon: '•', good: true, desc: '' } }
+
+// 背包中可播种的种子：seed-<基础id> 与 seed-v<品种id>
+const seedChoices = computed(() => {
+  const out = []
+  for (const it of store.inventory.filter((x) => x.cat === 'seed')) {
+    let c = null
+    if (it.item_id.startsWith('seed-v')) {
+      c = store.allCrops.find((x) => x.isVariety && x.id === Number(it.item_id.slice(6)))
+    } else if (it.item_id.startsWith('seed-')) {
+      c = store.allCrops.find((x) => !x.isVariety && x.id === Number(it.item_id.slice(5)))
+    }
+    if (c) out.push({ ...c, qty: it.qty, traitIcons: (c.traits || []).map((k) => ({ k, ...traitDef(k) })) })
+  }
+  return out
+})
 </script>
 
 <style scoped>
@@ -107,6 +132,14 @@ h3 { margin:0 0 10px;color:#fff;font-size:15px; }
 .sc-icon { font-size:20px; }
 .sc-days { color:#8ba2c8; }
 .sc-seed { color:#ffc107; }
+.sc-name em { font-style:normal;font-size:10px; }
+.sc-traits { display:flex;gap:1px;height:12px; }
+.sc-traits i { font-style:normal;font-size:10px; }
+.sc-traits i.bad { filter:grayscale(.2); }
+.plot-traits { display:flex;gap:6px;flex-wrap:wrap;margin:4px 0 6px; }
+.plot-traits i { font-style:normal;font-size:10px;color:#a5d6a7;background:#1b3a21;padding:2px 6px;border-radius:4px; }
+.plot-traits i.bad { color:#ef9a9a;background:#3a1f1f; }
+.crop-line .hybrid { font-style:normal;font-size:10px; }
 
 .action {
   width:100%;margin-top:6px;background:#4381ff;border:none;border-radius:9px;
