@@ -35,14 +35,18 @@
       <!-- 空地：播种 -->
       <template v-if="!p.crop_id">
         <div class="seed-crops">
-          <button v-for="c in store.crops" :key="c.id"
+          <button v-for="c in seedList" :key="c.id"
                   class="seed-opt"
-                  :class="{sel: store.selectedCropId===c.id}"
+                  :class="{sel: store.selectedCropId===c.id, hybrid: c.kind==='hybrid'}"
                   @click="store.selectedCropId = c.id">
             <span class="sc-icon">{{ c.sprite }}</span>
             <span class="sc-name">{{ c.name }}</span>
+            <span v-if="traitsOf(c.id).length" class="sc-traits">
+              <i v-for="t in traitsOf(c.id)" :key="t">{{ traitIcon(t) }}</i>
+            </span>
             <span class="sc-days">{{ c.days }}天</span>
-            <span class="sc-seed">种{{ c.seedPrice }}</span>
+            <span v-if="c.kind==='hybrid'" class="sc-hybrid">🧬杂交</span>
+            <span v-else class="sc-seed">种{{ c.seedPrice }}</span>
           </button>
         </div>
         <button class="action primary" @click="store.plant()" :disabled="!store.selectedCropId">🌱 播种</button>
@@ -53,7 +57,11 @@
         <div class="crop-line">
           <span class="crop-sprite">{{ crop?.sprite }}</span>
           <span>{{ crop?.name }}</span>
+          <span v-if="crop?.kind==='hybrid'" class="hybrid-tag">🧬 杂交</span>
           <span class="stage" :class="{full:isGrown}">{{ isGrown ? '已成熟' : '生长 ' + p.stage + '/' + (crop?.days-1 || 0) }}</span>
+        </div>
+        <div v-if="plotTraits.length" class="crop-traits">
+          <i v-for="t in plotTraits" :key="t" class="ct-badge">{{ traitIcon(t) }}{{ traitName(t) }}</i>
         </div>
         <div class="actions-grid">
           <button class="action" @click="store.water()">💧 浇水</button>
@@ -73,6 +81,20 @@ const store = useGameStore()
 const p = computed(() => store.selectedPlot || {})
 const crop = computed(() => store.crops.find((c) => c.id === p.value.crop_id))
 const isGrown = computed(() => crop.value && p.value.stage >= (crop.value.days - 1))
+
+// 只展示背包中实际持有种子的作物（含杂交种子）
+const seedList = computed(() => {
+  const held = new Set(
+    store.inventory.filter((it) => it.cat === 'seed').map((it) => Number(it.item_id.split('-')[1]))
+  )
+  return store.crops.filter((c) => held.has(c.id))
+})
+function traitsOf(cropId) {
+  return store.varietyMap.get(cropId)?.traits || []
+}
+const plotTraits = computed(() => traitsOf(p.value.crop_id))
+function traitName(id) { return store.traitBook[id]?.name || id }
+function traitIcon(id) { return store.traitBook[id]?.icon || '•' }
 function barColor(v) { return v < 30 ? '#ef5350' : v < 60 ? '#ffb300' : '#4caf50' }
 </script>
 
@@ -104,9 +126,15 @@ h3 { margin:0 0 10px;color:#fff;font-size:15px; }
   cursor:pointer;color:#dbe4f3;font-size:11px;
 }
 .seed-opt.sel { border-color:#ffd54f;box-shadow:0 0 0 1px #ffd54f; }
+.seed-opt.hybrid { border-color:rgba(206,147,216,0.5); }
 .sc-icon { font-size:20px; }
 .sc-days { color:#8ba2c8; }
 .sc-seed { color:#ffc107; }
+.sc-hybrid { color:#ce93d8;font-size:10px; }
+.sc-traits { display:flex;gap:2px;font-size:11px;line-height:1; }
+.hybrid-tag { color:#ce93d8;font-size:10px;background:#241a3d;border:1px solid rgba(206,147,216,0.3);padding:1px 6px;border-radius:5px; }
+.crop-traits { display:flex;flex-wrap:wrap;gap:4px;margin:2px 0 6px; }
+.ct-badge { font-style:normal;font-size:10px;color:#ce93d8;background:#2a1b3d;border:1px solid rgba(206,147,216,0.3);padding:1px 6px;border-radius:5px; }
 
 .action {
   width:100%;margin-top:6px;background:#4381ff;border:none;border-radius:9px;

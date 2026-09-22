@@ -131,6 +131,38 @@ CREATE TABLE IF NOT EXISTS production_jobs (
   cancel_abs INTEGER DEFAULT NULL,      -- 取消时的绝对天（NULL 未取消）
   status TEXT NOT NULL DEFAULT 'running' -- running/done/canceled/collected
 );
+
+-- ===== 杂交育种 =====
+-- 品种登记：原生作物不在此表；杂交成功即向 crops 插入一行并在此记录性状与谱系。
+-- 收获/播种/出售/加工只认 crops.id，本专表提供性状（影响生长结算）与谱系展示。
+CREATE TABLE IF NOT EXISTS varieties (
+  crop_id INTEGER PRIMARY KEY,          -- 与 crops.id 一致
+  base_id INTEGER NOT NULL,             -- 母本品种（继承主体性状的原生作物 id；加工按此匹配）
+  parent_a_crop INTEGER NOT NULL,       -- 父本 A 的 crops.id
+  parent_b_crop INTEGER NOT NULL,       -- 父本 B 的 crops.id
+  parent_a_trial INTEGER,               -- 由哪个试验诞生（原生作物父本为 NULL）
+  parent_b_trial INTEGER,
+  gen INTEGER NOT NULL DEFAULT 1,       -- 谱系深度（世代，原生作物视为 0）
+  traits TEXT NOT NULL DEFAULT '[]',    -- 性状 id 数组 JSON（见 server/breeding.js TRAITS）
+  born_abs INTEGER NOT NULL             -- 培育成功的绝对天
+);
+
+-- 育种试验：投入两批作物，随游戏天推进，受养护（浇水/施肥）与天气影响
+CREATE TABLE IF NOT EXISTS breeding_trials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  parent_a_crop INTEGER NOT NULL,       -- 父本 A crops.id
+  parent_b_crop INTEGER NOT NULL,       -- 父本 B crops.id
+  days_total INTEGER NOT NULL,          -- 预计试验天数
+  elapsed INTEGER NOT NULL DEFAULT 0,   -- 已推进天数（仅生长条件满足时增长）
+  water INTEGER NOT NULL DEFAULT 80,    -- 试验墒情（养护浇水可补满）
+  fert INTEGER NOT NULL DEFAULT 80,     -- 试验养分（养护施肥可补满）
+  health INTEGER NOT NULL DEFAULT 100,  -- 健康度：条件恶劣逐日下降，决定成败与种子产量
+  start_abs INTEGER NOT NULL,           -- 开始绝对天
+  finish_abs INTEGER,                   -- 结束绝对天（NULL 进行中）
+  result_crop INTEGER,                  -- 成功时诞生的新品种 crops.id
+  seeds INTEGER NOT NULL DEFAULT 0,     -- 产出种子数（成功后自动入库）
+  status TEXT NOT NULL DEFAULT 'growing' -- growing/success/fail
+);
 `)
 
 // 兼容旧存档：player 增加绝对天数（天气结算对齐用）
@@ -144,3 +176,14 @@ const plotCols = db.prepare('PRAGMA table_info(plots)').all().map((c) => c.name)
 if (!plotCols.includes('irr_priority')) {
   db.exec('ALTER TABLE plots ADD COLUMN irr_priority INTEGER NOT NULL DEFAULT 1')
 }
+
+// 兼容旧存档：crops 增加 kind（base 原生 / hybrid 杂交培育）；旧作物行全部默认原生
+const cropCols = db.prepare('PRAGMA table_info(crops)').all().map((c) => c.name)
+if (!cropCols.includes('kind')) {
+  db.exec("ALTER TABLE crops ADD COLUMN kind TEXT NOT NULL DEFAULT 'base'")
+}
+
+// 兼容旧存档：补建育种坊（新存档在 seed() 中一并插入）
+db.exec(`INSERT INTO buildings (id,name,level,x,y,desc)
+         SELECT 5,'育种坊',1,9,0,'杂交两批作物，培育带遗传性状的新品种'
+         WHERE NOT EXISTS (SELECT 1 FROM buildings WHERE id=5)`)

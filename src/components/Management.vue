@@ -3,6 +3,7 @@
     <button v-for="t in tabs" :key="t.key" :class="{active:tab===t.key}" @click="tab=t.key">
       {{ t.label }}
       <span v-if="t.key==='process' && collectableJobs.length" class="badge">{{ collectableJobs.length }}</span>
+      <span v-if="t.key==='breed' && breedingBadge" class="badge">{{ breedingBadge }}</span>
     </button>
   </div>
 
@@ -10,7 +11,7 @@
   <div v-if="tab==='market'" class="page">
     <div class="pcol card">
       <h4>🌾 种子商店</h4>
-      <div class="row" v-for="c in store.crops" :key="c.id">
+      <div class="row" v-for="c in baseCrops" :key="c.id">
         <span class="i">{{ c.sprite }}</span>
         <div class="m-info">
           <b>{{ c.name }}</b>
@@ -21,6 +22,7 @@
         <button class="mini" @click="store.buySeed(c.id,1)">买</button>
         <button class="mini" @click="store.buySeed(c.id,5)">买×5</button>
       </div>
+      <p class="m-hint">🧬 带性状的杂交种子不在商店出售：去「育种坊」培育，或收获时概率留种。</p>
     </div>
     <div class="pcol card">
       <h4>💰 出售作物</h4>
@@ -67,7 +69,9 @@
           <span class="tag">{{ r.fromIcon }} {{ r.fromName }} ×{{ r.consume }}/批</span>
           <span class="tag">→ {{ r.name }} ×{{ r.gain }}</span>
           <span class="tag">⏱ {{ r.days }} 天/批</span>
-          <span class="tag">库存 ×{{ stockOf(r.from) }}</span>
+          <span class="tag" :class="{hybridstock: r.fromBase != null}">
+            库存 ×{{ recipeStock(r) }}<template v-if="r.fromBase != null">（含杂交品种）</template>
+          </span>
         </div>
         <div class="proc-ctl">
           <button class="mini" :disabled="!canMake(r,1)" @click="doEnqueue(r,1)">排产×1</button>
@@ -105,6 +109,9 @@
       </div>
     </div>
   </div>
+
+  <!-- 育种坊 -->
+  <BreedingPanel v-if="tab==='breed'" />
 
   <!-- 畜棚 -->
   <div v-if="tab==='barn'" class="page">
@@ -168,6 +175,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useGameStore } from '@/store/game'
+import BreedingPanel from './BreedingPanel.vue'
 const store = useGameStore()
 const tab = ref('market')
 const healthColor = '#4caf50'
@@ -175,10 +183,18 @@ const healthColor = '#4caf50'
 const tabs = [
   { key: 'market', label: '🏪 市场' },
   { key: 'process', label: '⚙️ 加工坊' },
+  { key: 'breed', label: '🧬 育种坊' },
   { key: 'barn', label: '🐖 畜棚' },
   { key: 'bag', label: '🎒 背包' },
   { key: 'build', label: '🏠 建筑' }
 ]
+
+// 杂交成功的新品种会加入 store.crops；原生（商店在售）以 kind 区分
+const baseCrops = computed(() => store.crops.filter((c) => c.kind !== 'hybrid'))
+// 育种坊完成的试验数（提醒领取/查看新品种）
+const breedingBadge = computed(() =>
+  store.breedingTrials.filter((t) => t.status === 'success').length
+)
 
 const cropIcon = computed(() => {
   const m = {}
@@ -197,7 +213,11 @@ const sellable = computed(() =>
 function catName(c) { return { seed: '种子', crop: '作物', product: '制品', material: '材料' }[c] || c }
 function iconOf(it) {
   if (it.cat === 'crop') return cropIcon.value[it.item_id.split('-')[1]] || '🧺'
-  if (it.cat === 'seed') return '🌱'
+  if (it.cat === 'seed') {
+    // 杂交种子用品种自身图标，便于辨认
+    const cid = it.item_id.split('-')[1]
+    return cropIcon.value[cid] || '🌱'
+  }
   if (it.cat === 'product') { return { 'p-chicken': '🥚', 'p-cow': '🥛', 'p-sheep': '🧶' }[it.item_id] || '📦' }
   if (it.item_id === 'disaster-kit') return '🧱'
   return { flour: '🍞', juice: '🧃', cheese: '🧀', bread: '🥖', wool: '🧵', popcorn: '🍿', pickle: '🥬' }[it.item_id] || '📦'
@@ -209,8 +229,26 @@ const mill = computed(() => store.buildings.find((b) => b.name === '加工坊'))
 const barn = computed(() => store.buildings.find((b) => b.name === '畜棚'))
 
 // ===== 生产队列 =====
+// 配方是否接受某库存项：fromBase 匹配时，同一母本的杂交品种也可加工
+function recipeAccepts(r, itemId) {
+  if (itemId === r.from) return true
+  if (r.fromBase != null) {
+    const m = /^crop-(\d+)$/.exec(itemId)
+    if (m) {
+      const v = store.varietyMap.get(Number(m[1]))
+      const baseId = v ? v.base_id : Number(m[1])
+      return baseId === r.fromBase
+    }
+  }
+  return false
+}
 function stockOf(itemId) {
   return store.inventory.find((it) => it.item_id === itemId)?.qty || 0
+}
+// 配方可用库存（含杂交品种），供按钮置灰与数量预估
+function recipeStock(r) {
+  if (r.fromBase == null) return stockOf(r.from)
+  return store.inventory.reduce((s, it) => s + (recipeAccepts(r, it.item_id) ? it.qty : 0), 0)
 }
 function recipeIcon(id) {
   return store.recipes.find((r) => r.id === id)?.icon || '🛠️'
@@ -220,11 +258,11 @@ const freeSlots = computed(() => Math.max(0, store.queueCapacity - store.queuedB
 function canMake(r, n) {
   if (mill.value.level < r.needLv) return false
   if (n > freeSlots.value) return false
-  return stockOf(r.from) >= r.consume * n
+  return recipeStock(r) >= r.consume * n
 }
 async function doEnqueue(r, n) {
   // 原料/空位只够一部分时，自动收缩为可做批次数
-  const real = Math.min(n, Math.floor(stockOf(r.from) / r.consume), freeSlots.value)
+  const real = Math.min(n, Math.floor(recipeStock(r) / r.consume), freeSlots.value)
   if (real <= 0) return
   try { await store.enqueueProduction(r.id, real) } catch { /* toast 已提示 */ }
 }
@@ -303,4 +341,6 @@ h4 { margin:0 0 8px;color:#fff;display:flex;gap:8px;align-items:center; }
 .job-bar i{display:block;height:100%;background:linear-gradient(90deg,#2962ff,#5c97ff);transition:width .3s;}
 .job.done .job-bar i{background:#43a047;}
 h4 .collect-all{margin-left:auto;font-size:11px;}
+.m-hint{font-size:11px;color:#8ba2c8;margin:8px 0 0;line-height:1.6;}
+.tag.hybridstock{color:#ce93d8;}
 </style>

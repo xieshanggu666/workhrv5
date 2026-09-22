@@ -38,9 +38,19 @@ npm run dev
    降雨/暴雨为蓄水池补水，干旱/酷暑加速蒸发；设施可停用（断流）/启用（恢复）/拆除（返还半价），
    地块可设灌溉优先级，干涸断流会在事件记录中预警
 
+9. **杂交育种**：育种坊投入两批不同作物（各 ×2 + 金币）建立试验，试验随游戏日推进，
+   每日消耗墒情/养分，可浇水施肥养护，恶劣天气会阻断生长并损伤秧苗，健康度过低则失败；
+   亲本的耐旱/抗寒/强韧等抗性会惠及试验。成功后诞生带遗传性状的新品种（早熟/抗虫/耐旱/
+   抗寒/强韧/丰产/优品），性状在亲本间遗传并有概率变异（育种坊升级提高变异率、增加试验位），
+   种子自动入库。新品种注册为正式作物，贯通播种、生长（性状影响每日结算）、收获、加工
+   （按母本品种匹配，如各品种小麦均可磨面粉）与市场出售；品种图鉴保留完整亲本谱系（F1/F2…）
+
 ## 数据库表
 
-`player` `plots` `crops` `inventory` `buildings` `animals` `weather_events` `weather_log` `production_jobs` `irrigation`
+`player` `plots` `crops` `varieties` `breeding_trials` `inventory` `buildings` `animals` `weather_events` `weather_log` `production_jobs` `irrigation`
+
+> 所有新增表/列均通过 `CREATE TABLE IF NOT EXISTS` 与 `ALTER TABLE ADD COLUMN` 迁移，
+> 旧存档启动时自动补建育种坊、为老作物补 `kind='base'`，无需手动处理。
 
 ## 后续可扩展
 

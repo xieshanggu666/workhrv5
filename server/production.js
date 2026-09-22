@@ -1,17 +1,34 @@
 import { db } from './db.js'
 
+// 取杂交作物的母本原生作物 id；原生作物返回自身（与 server/breeding.js 同逻辑，
+// 此处不互相 import 以避免育种模块未来依赖加工模块时形成循环）
+function baseIdOf(cropId) {
+  return db.prepare('SELECT base_id FROM varieties WHERE crop_id=?').get(cropId)?.base_id || Number(cropId)
+}
+
+// 配方需要的原料可能是「某原生作物的任意品种」：fromBase 指定母本原生作物 id，
+// 杂交培育出的新品种只要母本匹配即可加工，贯通育种 → 加工链路
+function recipeAccepts(recipe, itemId) {
+  if (itemId === recipe.from) return true
+  if (recipe.fromBase != null) {
+    const m = /^crop-(\d+)$/.exec(itemId)
+    if (m && baseIdOf(Number(m[1])) === recipe.fromBase) return true
+  }
+  return false
+}
+
 // ===== 配方表（以服务端为准，前端仅做展示）=====
 // days：每批耗时（游戏天）；needLv：加工坊等级要求
 export const RECIPES = [
   {
     id: 'flour', name: '面粉', icon: '🍞',
-    from: 'crop-5', fromName: '小麦', fromIcon: '🌾', fromCat: 'crop',
+    from: 'crop-5', fromBase: 5, fromName: '小麦', fromIcon: '🌾', fromCat: 'crop',
     consume: 2, result: 'flour', resultName: '面粉', resultCat: 'material',
     gain: 1, days: 1, needLv: 1
   },
   {
     id: 'juice', name: '番茄汁', icon: '🧃',
-    from: 'crop-2', fromName: '番茄', fromIcon: '🍅', fromCat: 'crop',
+    from: 'crop-2', fromBase: 2, fromName: '番茄', fromIcon: '🍅', fromCat: 'crop',
     consume: 2, result: 'juice', resultName: '番茄汁', resultCat: 'product',
     gain: 1, days: 1, needLv: 1
   },
@@ -35,13 +52,13 @@ export const RECIPES = [
   },
   {
     id: 'popcorn', name: '烤玉米', icon: '🍿',
-    from: 'crop-3', fromName: '玉米', fromIcon: '🌽', fromCat: 'crop',
+    from: 'crop-3', fromBase: 3, fromName: '玉米', fromIcon: '🌽', fromCat: 'crop',
     consume: 2, result: 'popcorn', resultName: '烤玉米', resultCat: 'product',
     gain: 1, days: 1, needLv: 4
   },
   {
     id: 'pickle', name: '泡菜', icon: '🥬',
-    from: 'crop-6', fromName: '白菜', fromIcon: '🥬', fromCat: 'crop',
+    from: 'crop-6', fromBase: 6, fromName: '白菜', fromIcon: '🥬', fromCat: 'crop',
     consume: 3, result: 'pickle', resultName: '泡菜', resultCat: 'product',
     gain: 2, days: 2, needLv: 5
   }
@@ -60,8 +77,27 @@ const q = (sql, ...p) => db.prepare(sql).all(...p)
 const q1 = (sql, ...p) => db.prepare(sql).get(...p)
 const run = (sql, ...p) => db.prepare(sql).run(...p)
 
-function stockOf(itemId) {
-  return q1('SELECT qty FROM inventory WHERE item_id=?', itemId)?.qty || 0
+// 配方可用库存：同一母本的所有品种作物合计（如各品种小麦都能磨面粉）
+function stockOfRecipe(r) {
+  return q('SELECT item_id,qty FROM inventory').reduce(
+    (s, it) => s + (recipeAccepts(r, it.item_id) ? it.qty : 0), 0
+  )
+}
+// 按 FIFO 从匹配配方的库存堆中扣料（杂交品种先熟先扣）
+function consumeForRecipe(r, need) {
+  const stacks = q('SELECT id,item_id,qty FROM inventory ORDER BY id')
+    .filter((it) => recipeAccepts(r, it.item_id))
+  let remain = need
+  for (const s of stacks) {
+    const take = Math.min(remain, s.qty)
+    if (take > 0) {
+      run('UPDATE inventory SET qty=qty-? WHERE id=?', take, s.id)
+      remain -= take
+    }
+    if (remain <= 0) break
+  }
+  cleanEmpty()
+  return remain === 0
 }
 function addInv(itemId, name, cat, n) {
   const row = q1('SELECT qty FROM inventory WHERE item_id=?', itemId)
@@ -184,11 +220,10 @@ export function enqueueJob({ recipeId, qty, millLevel, currentAbs }) {
     throw Object.assign(new Error(`队列已满（${used}/${capacity(millLevel)} 批），等工单完工或取消一些再排产`), { status: 400 })
   }
   const need = r.consume * n
-  if (stockOf(r.from) < need) throw Object.assign(new Error(`原料不足：需要 ${r.fromName} ×${need}`), { status: 400 })
+  if (stockOfRecipe(r) < need) throw Object.assign(new Error(`原料不足：需要 ${r.fromName} ×${need}`), { status: 400 })
   db.exec('BEGIN IMMEDIATE')
   try {
-    run('UPDATE inventory SET qty=qty-? WHERE item_id=?', need, r.from)
-    cleanEmpty()
+    if (!consumeForRecipe(r, need)) throw Object.assign(new Error(`原料不足：需要 ${r.fromName} ×${need}`), { status: 400 })
     const res = run(
       `INSERT INTO production_jobs
        (recipe_id,recipe_name,result_id,result_name,result_cat,from_id,from_name,from_cat,

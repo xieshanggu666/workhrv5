@@ -27,6 +27,11 @@ export const useGameStore = defineStore('game', {
     irrigation: [],
     irrigationCosts: { reservoir: 60, canal: 8 },
     irrBuildMode: null,      // 'reservoir' | 'canal' | null：地图放置模式
+    // 杂交育种
+    breedingTrials: [],
+    varieties: [],
+    traitBook: {},
+    breedingSlots: 0,
     selectedPlot: null,
     seedMode: false,
     selectedCropId: null,
@@ -38,7 +43,15 @@ export const useGameStore = defineStore('game', {
       const map = ['🌸 春', '☀️ 夏', '🍂 秋', '❄️ 冬']
       return s.player ? map[s.player.season % 4] : '🌸 春'
     },
-    currentSeason: (s) => s.player?.season ?? 0
+    currentSeason: (s) => s.player?.season ?? 0,
+    // cropId -> 杂交品种信息（性状/谱系），原生作物为 undefined
+    varietyMap: (s) => {
+      const m = new Map()
+      s.varieties.forEach((v) => m.set(v.crop_id, v))
+      return m
+    },
+    // 进行中的试验数 / 槽位占用
+    breedingUsed: (s) => s.breedingTrials.filter((t) => t.status === 'growing').length
   },
   actions: {
     async load() {
@@ -57,6 +70,10 @@ export const useGameStore = defineStore('game', {
       this.queuedBatches = d.queuedBatches || 0
       this.irrigation = d.irrigation || []
       this.irrigationCosts = d.irrigationCosts || this.irrigationCosts
+      this.breedingTrials = d.breedingTrials || []
+      this.varieties = d.varieties || []
+      this.traitBook = d.traitBook || {}
+      this.breedingSlots = d.breedingSlots || 0
       this.loaded = true
     },
     pushLog(msg, type = 'info') {
@@ -96,7 +113,7 @@ export const useGameStore = defineStore('game', {
     async harvest() {
       if (!this.selectedPlot) return
       const r = await api('/harvest', 'POST', { plotId: this.selectedPlot.id })
-      if (r.ok) this.showToast(`收获 ${r.yield} +${r.gold}金`, 'success')
+      if (r.ok) this.showToast(`收获 ${r.yield} ×${r.qty || 1} +${r.gold}金`, 'success')
       else this.showToast('作物还未成熟', 'warn')
       await this.load()
     },
@@ -221,6 +238,35 @@ export const useGameStore = defineStore('game', {
     async setIrrPriority(plotId, priority) {
       try {
         await api('/irrigation/priority', 'POST', { plotId, priority })
+        await this.load()
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+
+    // ===== 杂交育种 =====
+    async startBreeding(cropAId, cropBId) {
+      try {
+        const r = await api('/breeding/start', 'POST', { cropAId, cropBId })
+        await this.load()
+        this.showToast(`🧬 试验#${r.id} 已开始，预计 ${r.daysTotal} 天，记得浇水施肥`, 'success')
+        return r
+      } catch (e) { this.showToast(e.message, 'warn'); throw e }
+    },
+    async careBreeding(id, kind) {
+      try {
+        await api('/breeding/care', 'POST', { id, kind })
+        await this.load()
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+    async cancelBreeding(id) {
+      try {
+        const r = await api('/breeding/cancel', 'POST', { id })
+        await this.load()
+        this.showToast(`试验已取消，返还 🪙${r.refund}`, 'info')
+      } catch (e) { this.showToast(e.message, 'warn') }
+    },
+    async clearBreeding(id) {
+      try {
+        await api('/breeding/clear', 'POST', { id })
         await this.load()
       } catch (e) { this.showToast(e.message, 'warn') }
     },

@@ -81,9 +81,10 @@ function drawBuildings() {
     manure: { e: '🏠', w: 2, h: 2 },
     mill: { e: '⚙️', w: 2, h: 2 },
     barn: { e: '🐖', w: 2, h: 2 },
-    market: { e: '🏪', w: 2, h: 2 }
+    market: { e: '🏪', w: 2, h: 2 },
+    breeding: { e: '🧬', w: 2, h: 2 }
   }
-  const names = { 农舍: 'manure', 加工坊: 'mill', 畜棚: 'barn', 市场: 'market' }
+  const names = { 农舍: 'manure', 加工坊: 'mill', 畜棚: 'barn', 市场: 'market', 育种坊: 'breeding' }
   for (const b of store.buildings) {
     const d = bdefs[names[b.name]] || bdefs.manure
     const x = tile(b.x)
@@ -164,6 +165,13 @@ function drawCrop(x, y, plot, crop) {
     ctx.font = '10px sans-serif'
     ctx.fillStyle = '#ffd54f'
     ctx.fillText('成熟', x + TILE / 2, y + TILE / 2 + 18)
+  }
+  // 杂交品种标记
+  if (store.varietyMap.get(crop.id)) {
+    ctx.font = '11px sans-serif'
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'middle'
+    ctx.fillText('🧬', x + 11, y + 12)
   }
 }
 
